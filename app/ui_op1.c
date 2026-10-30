@@ -177,7 +177,7 @@ static int isin(unsigned phase)
 /* ------------------------------------------------------------------ */
 /* State                                                              */
 /* ------------------------------------------------------------------ */
-enum page { P_TAPE, P_SYNTH, P_ENV, P_LFO, P_SEQ, P_MIX, P_FX, P_ARP, P_PROJECT, P_COUNT };
+enum page { P_TAPE, P_SYNTH, P_ENV, P_LFO, P_SEQ, P_MIX, P_FX, P_ARP, P_PROJECT, P_SETUP, P_COUNT };
 enum { OCT_DOWN, OCT_UP, FX, SCL, ENV, LFO, EDIT, GLO, HOME, SAVE, ARP, SEQ, PLAY, REC };
 #define BUTTON(b) (1U << (b))
 static const uint8_t white_keys[16] = {0, 2, 4, 6, 7, 9, 11, 12, 14, 16, 18, 19, 21, 23, 24, 26};
@@ -189,11 +189,13 @@ static const char *const source_names[GROOVE_SOURCES] = {"DX7 FM", "BASS 303", "
 #else
 #define SOURCE_COUNT GROOVE_SAMPLE + 1
 #endif
-static const char *const page_names[P_COUNT] = {"TAPE", "SYNTH", "ENVELOPE", "LFO", "SEQUENCER", "MIXER", "EFFECTS", "ARPEGGIO", "ALBUM"};
+static const char *const page_names[P_COUNT] = {"TAPE", "SYNTH", "ENVELOPE", "LFO", "SEQUENCER", "MIXER", "EFFECTS", "ARPEGGIO", "ALBUM", "SETUP"};
 
 static unsigned page, track, cursor, writing, octave, drum, selected_note = 60, step_page;
 static unsigned syn_page[GROOVE_TRACKS], drum_part[GROOVE_TRACKS];
 static unsigned seq_sub, shift_down, tape_follow = 1, fx_page;
+static unsigned setup_view, setup_action, setup_device, setup_forget;
+static int setup_result;
 static uint32_t prev_buttons, prev_keys, blocked_keys, boot_at, frame_at, notice_until, arp_ms;
 static unsigned boot_active, arp_down, arp_long, retry_reset;
 static const char *notice;
@@ -227,6 +229,11 @@ struct frame_state {
     uint8_t step_set[5], arp[6], project_dirty, project_slot_now;
     char project[13], preset[28];
     unsigned fx_page, swing, metro;
+    struct fm1_ble_status ble;
+    struct fm1_bluetooth_status radio;
+    struct fm1_ble_device devices[FM1_BLE_MAX_DEVICES];
+    unsigned radio_flags, radio_role, clock_mode, setup_view, setup_action, setup_device, setup_forget, settings_error;
+    int setup_result;
 };
 static struct frame_state fs;
 
@@ -428,6 +435,49 @@ static void adjust_knob(unsigned k, int d, uint32_t now)
     (void)now;
 }
 
+/* --- Setup: Bluetooth radio, BLE MIDI host, clock source ---------- */
+static void setup_knobs(const struct fm1_controls *c)
+{
+    struct fm1_ble_status ble = {0};
+    fm1_ble_get_status(&ble);
+    if (!setup_view) {
+        unsigned flags = groove_settings_radio_flags(), role = groove_settings_role_value();
+        for (unsigned i = 0; i < 2; ++i) {
+            int d = c->encoders[2 + i];
+            if (d > 0) flags |= 1U << i; else if (d < 0) flags &= ~(1U << i);
+        }
+        if (c->encoders[4]) role = (unsigned)clampi((int)role + c->encoders[4], FM1_BLE_PERIPHERAL, FM1_BLE_CENTRAL);
+        if (flags != groove_settings_radio_flags() || role != groove_settings_role_value())
+            setup_result = groove_settings_radio(flags, role);
+        if (c->encoders[5]) groove_settings_clock(c->encoders[5] > 0 ? GROOVE_CLOCK_MIDI : GROOVE_CLOCK_INTERNAL);
+        setup_action = (unsigned)clampi((int)setup_action + c->encoders[6], 0, 1);
+    } else {
+        unsigned count = ble.count > FM1_BLE_MAX_DEVICES ? FM1_BLE_MAX_DEVICES : ble.count;
+        setup_device = (unsigned)clampi((int)setup_device + c->encoders[0], 0, count ? (int)count - 1 : 0);
+        setup_action = (unsigned)clampi((int)setup_action + c->encoders[6], 0, 3);
+    }
+}
+static void setup_save(void)
+{
+    struct fm1_ble_status ble = {0};
+    fm1_ble_get_status(&ble);
+    if (!setup_view) {
+        unsigned flags = groove_settings_radio_flags(), role = groove_settings_role_value();
+        if (setup_action) {
+            if (setup_forget != 1) setup_forget = 1;
+            else { setup_result = fm1_ble_forget_bonds(); setup_forget = setup_result ? 0 : 2; }
+        } else if ((flags & (GROOVE_RADIO_ON | GROOVE_RADIO_MIDI)) == (GROOVE_RADIO_ON | GROOVE_RADIO_MIDI) && role == FM1_BLE_CENTRAL) {
+            setup_view = 1; setup_action = ble.count ? 0 : 1; setup_forget = 0;
+            if (ble.state == FM1_BLE_IDLE) setup_result = fm1_ble_scan();
+        } else setup_result = -1;
+    } else {
+        if (!setup_action) setup_result = fm1_ble_connect(setup_device);
+        else if (setup_action == 1) { setup_result = fm1_ble_scan(); if (!setup_result) setup_device = 0; }
+        else if (setup_action == 2) setup_result = fm1_ble_disconnect();
+        else { setup_view = setup_action = setup_forget = 0; setup_result = 0; }
+    }
+}
+
 static int apply_controls(const struct fm1_controls *c, uint32_t now)
 {
     uint32_t pressed = c->buttons & ~prev_buttons, key_down = c->keys & ~prev_keys;
@@ -463,7 +513,7 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
     if (arp_down && !arp_long && now - arp_ms >= 600U) { arp_long = 1; go(page == P_ARP ? P_TAPE : P_ARP); }
 
     /* page buttons */
-    if (pressed & BUTTON(HOME)) go(P_TAPE);
+    if (pressed & BUTTON(HOME)) { if (shift_down) { setup_view = setup_action = setup_forget = 0; setup_result = 0; go(P_SETUP); } else go(P_TAPE); }
     if (pressed & BUTTON(EDIT)) {
         if (page == P_SYNTH) { if (page_count()) syn_page[track] = (syn_page[track] + 1U) % page_count(); }
         else go(P_SYNTH);
@@ -475,7 +525,8 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
     }
     if ((pressed & BUTTON(GLO))) go(page == P_MIX ? P_TAPE : P_MIX);
     if ((pressed & BUTTON(FX))) { if (page == P_FX) fx_page = (fx_page + 1U) % 4U; else go(P_FX); }
-    if ((pressed & BUTTON(SAVE))) {
+    if ((pressed & BUTTON(SAVE)) && page == P_SETUP) setup_save();
+    else if ((pressed & BUTTON(SAVE))) {
         if (page != P_PROJECT) go(P_PROJECT);
         else if (shift_down) {
             int r = project_bank ? groove_factory_load(project_slot) : groove_project_load_slot(project_slot);
@@ -521,22 +572,25 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
 
     /* encoders */
     unsigned type = groove_source_type(track);
-    if (c->encoders[0]) {
+    if (page == P_SETUP) {
+        if (c->encoders[0] || c->encoders[1] || c->encoders[6] || c->encoders[2] || c->encoders[3] || c->encoders[4] || c->encoders[5]) setup_forget = 0;
+        setup_knobs(c);
+    } else if (c->encoders[0]) {
         if (page == P_SEQ) cursor = (unsigned)clampi((int)cursor + c->encoders[0], 0, (int)groove_sequence_length(track) - 1), step_page = cursor / 16U;
         else select_track((unsigned)clampi((int)track + c->encoders[0], 0, (int)UI_TRACKS - 1));
     }
-    if (c->encoders[1]) {
+    if (c->encoders[1] && page != P_SETUP) {
         if (page == P_TAPE || page == P_SEQ) {
             unsigned len = groove_sequence_length(track) / 16U;
             len = (unsigned)clampi((int)len + (c->encoders[1] > 0 ? 1 : -1), 1, 4);
             groove_sequence_length_set(track, len * 16U);
         } else groove_control_edit(track, 0, c->encoders[1], 0);
     }
-    for (unsigned k = 0; k < 4; ++k) {
+    for (unsigned k = 0; k < 4 && page != P_SETUP; ++k) {
         int d = encoder_step(2 + k, c->encoders[2 + k], now);
         if (d) adjust_knob(k, d, now);
     }
-    if (c->encoders[6]) {
+    if (c->encoders[6] && page != P_SETUP) {
         int d = c->encoders[6];
         switch (page) {
         case P_TAPE: case P_SYNTH: case P_ENV: case P_LFO:
@@ -666,6 +720,13 @@ static void capture(uint32_t now)
         groove_tone_copy(track, fs.part, fs.tone);
         groove_lfo_copy(track, fs.lfo);
     }
+    fm1_ble_get_status(&fs.ble); fm1_bluetooth_get_status(&fs.radio);
+    fs.radio_flags = groove_settings_radio_flags(); fs.radio_role = groove_settings_role_value();
+    fs.clock_mode = groove_clock_mode(); fs.settings_error = (unsigned)groove_settings_status() != 0;
+    fs.setup_view = setup_view; fs.setup_action = setup_action; fs.setup_device = setup_device;
+    fs.setup_forget = setup_forget; fs.setup_result = setup_result;
+    if (page == P_SETUP && setup_view)
+        for (unsigned i = 0; i < fs.ble.count && i < FM1_BLE_MAX_DEVICES; ++i) fm1_ble_get_device(i, &fs.devices[i]);
     fs.fx_page = fx_page; fs.swing = groove_sequence_setting(0); fs.metro = groove_sequence_setting(1);
     {
         char *o = fs.preset; unsigned prog = v->program;
@@ -1276,6 +1337,50 @@ static void draw_project(void)
     text_c(120, 150, fs.names[fs.slot], 2, INK);
 }
 
+/* --- Setup -------------------------------------------------------- */
+static void draw_setup(void)
+{
+    static const char *const states[] = {"OFF", "IDLE", "WAITING FOR DEVICE", "SCANNING", "CONNECTING", "FINDING MIDI",
+                                         "CONNECTED", "MIDI READY", "DISCONNECTING"};
+    static const char *const errors[] = {"", "STACK BUSY", "TIMED OUT", "NOT BLE MIDI", "GATT FAILED", "LINK LOST"};
+    header(fs.setup_view ? "MIDI HOST" : "SETUP", C_WHITE);
+    unsigned on = (fs.radio_flags & GROOVE_RADIO_ON) != 0;
+    unsigned midi = fs.radio_flags & GROOVE_RADIO_MIDI ? 1U + fs.radio_role : 0;
+    const char *state = !on ? "BLUETOOTH OFF" : !fs.radio.ready ? "RADIO ON DEVICE ONLY" : fs.ble.pending ? "APPLYING SETTINGS"
+        : !midi ? "MIDI OFF" : fs.ble.state <= FM1_BLE_DISCONNECTING ? states[fs.ble.state] : "UNKNOWN";
+    text_c(120, 28, state, 1, on ? C_GREEN : DIM);
+    if (!fs.setup_view) {
+        knob_cell(0, "BT", on ? "ON" : "OFF", on ? 100 : 0);
+        knob_cell(1, "BT AUDIO", fs.radio_flags & GROOVE_RADIO_AUDIO ? "ON" : "OFF", fs.radio_flags & GROOVE_RADIO_AUDIO ? 100 : 0);
+        knob_cell(2, "BLE ROLE", midi == 2 ? "HOST" : midi == 1 ? "DEVICE" : "OFF", midi * 50U);
+        knob_cell(3, "CLOCK", fs.clock_mode ? "MIDI" : "INT", fs.clock_mode ? 100 : 0);
+        const char *audio = !on || !(fs.radio_flags & GROOVE_RADIO_AUDIO) ? "AUDIO OFF" : fs.radio.audio_playing ? "AUDIO PLAYING"
+            : fs.radio.audio_connected ? "AUDIO CONNECTED" : "AUDIO WAITING FOR CONNECTION";
+        text_c(120, 60, audio, 1, fs.radio.audio_playing ? C_GREEN : DIM);
+        text_c(120, 90, fs.setup_action ? "> FORGET MIDI PAIRS" : "> MIDI DEVICE LIST (HOST)", 1, C_ORANGE);
+        text_c(120, 110, "E6 CHOOSE  SAVE OK", 1, DIM);
+    } else {
+        for (unsigned i = 0; i < FM1_BLE_MAX_DEVICES; ++i) {
+            int y = 44 + (int)i * 17;
+            if (i < fs.ble.count) {
+                fill(6, y, 228, 15, i == fs.setup_device ? PANEL2 : PANEL);
+                char n[4]; dec(n, (int)i + 1);
+                text(10, y + 4, n, 1, C_ORANGE, NOBG);
+                text(24, y + 4, fs.devices[i].name[0] ? fs.devices[i].name : "UNNAMED MIDI DEVICE", 1, INK, NOBG);
+            } else if (!i) text(10, y + 4, fs.ble.state == FM1_BLE_SCANNING ? "LOOKING FOR MIDI DEVICES..." : "NO DEVICES - SCAN BELOW", 1, DIM, NOBG);
+        }
+        static const char *const actions[] = {"> CONNECT SELECTED", "> SCAN", "> DISCONNECT", "> SETTINGS"};
+        text_c(120, 186, actions[fs.setup_action & 3U], 1, C_ORANGE);
+    }
+    const char *err = fs.setup_forget == 1 ? "FORGET MIDI PAIRS? SAVE YES / HOME NO"
+        : fs.setup_forget == 2 && !fs.ble.pending && !fs.ble.error ? "PAIR AGAIN; FORGET FM1 ON PEER TOO"
+        : fs.settings_error ? "SETTINGS NOT SAVED - RETRY" : fs.setup_result == -2 ? "BUSY - RETRY"
+        : fs.setup_result == -3 ? "RADIO ON DEVICE ONLY" : fs.setup_result ? "COMMAND UNAVAILABLE"
+        : fs.ble.error <= FM1_BLE_LINK_LOST ? errors[fs.ble.error] : "";
+    text_c(120, 160, err, 1, C_ORANGE);
+    hints("SHIFT+HOME SETUP  HOME EXIT");
+}
+
 /* --- Boot -------------------------------------------------------- */
 static void draw_boot(void)
 {
@@ -1289,7 +1394,7 @@ static void draw_boot(void)
 
 static void draw_frame(void)
 {
-    if (band_top == 0 || band_top >= 0) fill(0, (int)band_top, W, ROWS, BG);
+    fill(0, (int)band_top, W, ROWS, BG);
     if (fs.boot) { draw_boot(); return; }
     switch (fs.page) {
     case P_TAPE: draw_tape(); break;
@@ -1299,6 +1404,7 @@ static void draw_frame(void)
     case P_FX: draw_fx(); break;
     case P_ARP: draw_arp(); break;
     case P_PROJECT: draw_project(); break;
+    case P_SETUP: draw_setup(); break;
     default: break;
     }
     if (fs.notice_on) {
