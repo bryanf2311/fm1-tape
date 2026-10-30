@@ -23,13 +23,17 @@ jobs:
           Write-Host "toolchain: $pi32"
           (Get-FileHash $clang.FullName -Algorithm SHA256).Hash
       - name: Build browser preview + packaged firmware
-        shell: pwsh
+        shell: cmd
         timeout-minutes: 40
         env:
           FM1_SOURCE_URL: https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip
         run: |
-          .\build.bat --web
-          .\build.bat --package
+          rem build.bat starts Windows PowerShell 5.1; pwsh 7's module path would hide Get-FileHash.
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\system32\WindowsPowerShell\v1.0\Modules"
+          call build.bat --web
+          if errorlevel 1 exit /b 1
+          call build.bat --package
+          if errorlevel 1 exit /b 1
       - uses: actions/upload-artifact@v4
         with:
           name: fm1-tape-firmware
