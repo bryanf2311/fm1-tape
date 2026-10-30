@@ -1,0 +1,35 @@
+name: firmware
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install JieLi toolchain 2.5.3
+        shell: pwsh
+        run: |
+          curl.exe --fail --location --retry 3 -o "$env:RUNNER_TEMP\jl.exe" https://jl-update.oss-cn-shenzhen.aliyuncs.com/2.5.3.exe
+          Start-Process -FilePath "$env:RUNNER_TEMP\jl.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/DIR=C:\JL' -Wait
+          Get-ChildItem C:\JL\pi32\bin | Select-Object -First 5
+          (Get-FileHash C:\JL\pi32\bin\clang.exe -Algorithm SHA256).Hash
+      - name: Build browser preview + packaged firmware
+        shell: pwsh
+        env:
+          FM1_PI32_TOOLCHAIN: C:\JL\pi32
+          FM1_SOURCE_URL: https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip
+        run: |
+          .\build.bat --web
+          .\build.bat --package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fm1-tape-firmware
+          path: |
+            build/official-web/**
+            build/dx7/*.fwsc
+            build/dx7/firmware-report.json
+            build/preview/**
+          if-no-files-found: warn
