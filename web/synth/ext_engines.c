@@ -362,6 +362,39 @@ static void keys_render(void *p, int32_t *out, unsigned frames)
 }
 
 /* ------------------------------------------------------------------ */
+/* Factory presets (8 per engine, value order = parameter order)      */
+/* ------------------------------------------------------------------ */
+struct preset { const char *name; uint8_t v[EXT_PARAMS]; };
+static const struct preset presets[EXT_COUNT][EXT_PRESETS] = {
+    {{"INIT SAW", {40, 0, 24, 100, 20, 50, 2, 40}},    {"GLASS BELL", {10, 30, 30, 110, 25, 70, 0, 90}},
+     {"VOWEL CHOIR", {85, 20, 40, 90, 30, 20, 60, 80}}, {"ORGAN", {100, 0, 10, 120, 0, 0, 0, 30}},
+     {"ACID PULSE", {55, 70, 10, 60, 90, 100, 0, 25}},  {"METAL HIT", {127, 40, 60, 95, 60, 90, 0, 50}},
+     {"SOFT SINE", {0, 0, 15, 120, 0, 0, 25, 70}},      {"WARP LEAD", {45, 100, 35, 105, 40, 40, 5, 45}}},
+    {{"STRINGS", {45, 75, 10, 30, 70, 80, 90, 30}},     {"SLOW PAD", {60, 60, 20, 70, 100, 110, 100, 50}},
+     {"BRASS SWELL", {30, 85, 30, 100, 60, 50, 40, 60}}, {"DARK DRONE", {80, 35, 50, 90, 110, 120, 110, 100}},
+     {"SUPER LEAD", {90, 110, 10, 0, 0, 40, 60, 20}},   {"SOFT CHOIR", {35, 65, 5, 25, 85, 100, 127, 20}},
+     {"ICE WASH", {100, 120, 60, 60, 90, 127, 100, 0}}, {"TAPE WARBLE", {55, 55, 30, 60, 40, 70, 127, 70}}},
+    {{"SHIMMER", {50, 60, 70, 30, 30, 90, 60, 80}},     {"RAIN", {20, 15, 110, 60, 70, 0, 5, 40}},
+     {"DUST", {127, 10, 60, 100, 100, 10, 0, 30}},      {"FROZEN LAKE", {10, 90, 40, 10, 20, 60, 100, 120}},
+     {"GHOST CHOIR", {85, 95, 50, 25, 40, 50, 90, 110}}, {"BUBBLES", {0, 25, 90, 50, 60, 40, 10, 50}},
+     {"SWARM", {127, 40, 127, 80, 90, 20, 40, 70}},     {"AURORA", {40, 110, 35, 15, 50, 110, 110, 127}}},
+    {{"SUITCASE", {0, 60, 70, 40, 30, 40, 60, 40}},     {"TREM EP", {0, 70, 80, 30, 90, 60, 70, 50}},
+     {"MUSIC BOX", {1, 40, 60, 90, 0, 0, 80, 60}},      {"TUBULAR", {1, 70, 100, 100, 0, 0, 60, 90}},
+     {"CLAVINET", {2, 100, 35, 20, 0, 0, 100, 20}},     {"WAH CLAV", {2, 127, 30, 30, 40, 90, 127, 15}},
+     {"MARIMBA", {3, 60, 45, 30, 0, 0, 90, 25}},        {"VIBES", {3, 45, 95, 60, 70, 50, 50, 70}}},
+};
+void ext_preset(unsigned type, void *p, unsigned program)
+{
+    if (!ext_is(type)) return;
+    const struct preset *s = &presets[type - EXT_FIRST][program % EXT_PRESETS];
+    for (unsigned i = 0; i < EXT_PARAMS; ++i) COMMON(p)->pot[i] = s->v[i];
+}
+const char *ext_preset_name(unsigned type, unsigned program)
+{
+    return ext_is(type) ? presets[type - EXT_FIRST][program % EXT_PRESETS].name : "";
+}
+
+/* ------------------------------------------------------------------ */
 /* Dispatch                                                           */
 /* ------------------------------------------------------------------ */
 #define ENGINE(nm, type, params_, init_, start_, render_) \
@@ -389,6 +422,7 @@ void ext_init(unsigned type, void *p)
     COMMON(p)->limit = EXT_VOICES; COMMON(p)->rng = 0x1234567U;
     for (unsigned i = 0; i < EXT_PARAMS; ++i) COMMON(p)->pot[i] = e->params[i].def;
     ext_panic(type, p);
+    ext_preset(type, p, 0);
     if (e->init) e->init(p);
 }
 void ext_note(unsigned type, void *p, unsigned note, unsigned velocity, int cents)

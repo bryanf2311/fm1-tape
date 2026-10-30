@@ -9,6 +9,9 @@
 #include "instrument.h"
 #include "fm1_engine_control.h"
 #include <string.h>
+#ifdef FM1_HOST_TEST
+#include "ext_engines.h"
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Palette                                                            */
@@ -190,7 +193,7 @@ static const char *const page_names[P_COUNT] = {"TAPE", "SYNTH", "ENVELOPE", "LF
 
 static unsigned page, track, cursor, writing, octave, drum, selected_note = 60, step_page;
 static unsigned syn_page[GROOVE_TRACKS], drum_part[GROOVE_TRACKS];
-static unsigned seq_sub, shift_down, tape_follow = 1;
+static unsigned seq_sub, shift_down, tape_follow = 1, fx_page;
 static uint32_t prev_buttons, prev_keys, blocked_keys, boot_at, frame_at, notice_until, arp_ms;
 static unsigned boot_active, arp_down, arp_long, retry_reset;
 static const char *notice;
@@ -219,7 +222,8 @@ struct frame_state {
     char names[GROOVE_PROJECT_SLOTS][13];
     int slot_state[GROOVE_PROJECT_SLOTS];
     uint8_t step_set[5], arp[6], project_dirty, project_slot_now;
-    char project[13];
+    char project[13], preset[28];
+    unsigned fx_page, swing, metro;
 };
 static struct frame_state fs;
 
@@ -372,7 +376,19 @@ static void adjust_knob(unsigned k, int d, uint32_t now)
         } else groove_lfo_edit(track, col, d);
         break;
     case P_FX:
-        if (col < 3) groove_effects_edit(col, d); else groove_effects_edit(3, d);
+        if (fx_page == 0) {
+            if (col == 0) groove_effects_edit(0, d); else if (col == 1) groove_effects_edit(3, d);
+            else groove_sends_edit(track, col == 2 ? 0U : 1U, d);
+        } else if (fx_page == 1) {
+            if (col == 0) groove_effects_edit(1, d); else if (col == 1) groove_effects_edit(2, d);
+            else if (col == 2) groove_effects_edit(4, d); else groove_sends_edit(track, 1, d);
+        } else if (fx_page == 2) {
+            if (col == 0) groove_tempo_edit(d); else if (col == 1) groove_sequence_setting_edit(0, d);
+            else if (col == 2) groove_sequence_setting_edit(1, d); else groove_control_edit(track, 0, d, 0);
+        } else {
+            if (col == 0) groove_sends_edit(track, 0, d); else if (col == 1) groove_sends_edit(track, 1, d);
+            else if (col == 2) groove_control_edit(track, 0, d, 0); else groove_tempo_edit(d);
+        }
         break;
     case P_SEQ:
         if (col < 3) groove_step_setting_edit(track, cursor, col == 0 ? 1U : col == 1 ? 2U : 3U, d);
@@ -432,7 +448,7 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
         if (page == P_SEQ) seq_sub ^= 1U; else go(P_SEQ);
     }
     if ((pressed & BUTTON(GLO))) go(page == P_MIX ? P_TAPE : P_MIX);
-    if ((pressed & BUTTON(FX))) go(page == P_FX ? P_TAPE : P_FX);
+    if ((pressed & BUTTON(FX))) { if (page == P_FX) fx_page = (fx_page + 1U) % 4U; else go(P_FX); }
     if ((pressed & BUTTON(SAVE))) {
         if (page != P_PROJECT) go(P_PROJECT);
         else if (shift_down) {
@@ -495,14 +511,12 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
     if (c->encoders[6]) {
         int d = c->encoders[6];
         switch (page) {
-        case P_TAPE: {
-            struct groove_view v = {0}; groove_get_view(track, cursor, &v);
-            cursor = (unsigned)clampi((int)cursor + d, 0, (int)v.sequence_length - 1);
-            groove_edit_seek(track, cursor); tape_follow = 0; step_page = cursor / 16U;
-            break;
-        }
-        case P_SYNTH: case P_ENV: case P_LFO:
-            if (shift_down) {
+        case P_TAPE: case P_SYNTH: case P_ENV: case P_LFO:
+            if (shift_down && page == P_TAPE) {
+                struct groove_view v = {0}; groove_get_view(track, cursor, &v);
+                cursor = (unsigned)clampi((int)cursor + d, 0, (int)v.sequence_length - 1);
+                groove_edit_seek(track, cursor); tape_follow = 0; step_page = cursor / 16U;
+            } else if (shift_down) {
                 unsigned next = (unsigned)((int)type + (d > 0 ? 1 : -1) + SOURCE_COUNT) % SOURCE_COUNT;
                 if (!release_keys()) return 0;
                 if (groove_source_set(track, next)) say("ENGINE CHANGE FAILED", now);
@@ -511,9 +525,12 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
                     selected_note = groove_pad_count(track) ? groove_pad_note(track, 0) : 60;
                     say(source_names[next], now);
                 }
-            } else if (page == P_SYNTH) {
-                if (page_count()) syn_page[track] = (syn_page[track] + (d > 0 ? 1U : page_count() - 1U)) % page_count();
-            } else if (type == GROOVE_DX7) groove_adsr_enable(track, d > 0);
+            } else if (type == GROOVE_808 || type == GROOVE_PLUCK || type == GROOVE_SAMPLE) {
+                say("NO PRESETS - SHIFT+E6 ENGINE", now);
+            } else {
+                if (!release_keys()) return 0;
+                groove_control_edit(track, d > 0 ? 1 : -1, 0, 0);
+            }
             break;
         case P_SEQ: step_page = (unsigned)clampi((int)step_page + (d > 0 ? 1 : -1), 0, (int)groove_sequence_length(track) / 16 - 1); break;
         case P_ARP: groove_arp_edit(track, shift_down ? 5U : 4U, d); break;
@@ -621,6 +638,27 @@ static void capture(uint32_t now)
         groove_tone_copy(track, fs.part, fs.tone);
         groove_lfo_copy(track, fs.lfo);
     }
+    fs.fx_page = fx_page; fs.swing = groove_sequence_setting(0); fs.metro = groove_sequence_setting(1);
+    {
+        char *o = fs.preset; unsigned prog = v->program;
+        o[0] = 0;
+        if (fs.source == GROOVE_DX7) {
+            char t[8]; dec(t, (int)prog + 1);
+            if (prog < 99) cat(o, prog < 9 ? "00" : "0");
+            cat(o, t); cat(o, " ");
+            unsigned n = (unsigned)strlen(o);
+            for (unsigned i = 0; i < 10 && n < sizeof fs.preset - 1; ++i) {
+                char c = (char)fs.patch[145 + i];
+                o[n++] = c >= 32 && c < 127 ? c : ' ';
+            }
+            o[n] = 0;
+        } else if (fs.source == GROOVE_303) cat(o, (prog & 1U) ? "SQUARE WAVE" : "SAW WAVE");
+        else if (fs.source == GROOVE_PSG) { char t[8]; cat(o, "CHIP "); dec(t, (int)(prog & 3U) + 1); cat(o, t); }
+#ifdef FM1_HOST_TEST
+        else if (ext_is(fs.source)) { char t[8]; dec(t, (int)(prog % EXT_PRESETS) + 1); cat(o, t); cat(o, " "); cat(o, ext_preset_name(fs.source, prog)); }
+#endif
+        else cat(o, "NO PRESETS");
+    }
     if (page == P_PROJECT) {
         memcpy(fs.names, project_names, sizeof fs.names);
         memcpy(fs.slot_state, project_state, sizeof fs.slot_state);
@@ -692,10 +730,11 @@ static void draw_tape(void)
     unsigned pos = fs.playing || fs.writing ? fs.play_step : fs.cursor;
     int wl = 12 + (int)((len - pos) * 24U / len), wr = 12 + (int)(pos * 24U / len);
     unsigned angle = fs.playing ? (fs.now / 6U) & 255U : (fs.now / 1200U) & 255U;
-    reel(52, 62, 11, wl, angle, track_color[fs.track]);
-    reel(188, 62, 11, wr, angle, track_color[fs.track]);
+    wl = 10 + (wl - 12) * 22 / 24; wr = 10 + (wr - 12) * 22 / 24;
+    reel(52, 66, 9, wl, angle, track_color[fs.track]);
+    reel(188, 66, 9, wr, angle, track_color[fs.track]);
     /* tape path */
-    line(52 + wl - 2, 62 + 4, 96, 96, DIM); line(188 - wr + 2, 62 + 4, 144, 96, DIM);
+    line(52 + wl - 2, 66 + 4, 96, 96, DIM); line(188 - wr + 2, 66 + 4, 144, 96, DIM);
     hline(96, 96, 48, DIM);
     /* counter */
     unsigned bpm = fs.tempo ? fs.tempo : 120U;
@@ -703,11 +742,13 @@ static void draw_tape(void)
     char c[16]; c[0] = 0; char t[8];
     dec(t, (int)(tenths / 600U)); cat(c, t); cat(c, ":");
     dec(t, (int)((tenths / 10U) % 60U)); if (((tenths / 10U) % 60U) < 10U) cat(c, "0"); cat(c, t);
-    text_c(120, 54, c, 2, INK);
+    text_c(120, 56, c, 2, INK);
     char bar[16]; bar[0] = 0; dec(t, (int)(pos / 16U) + 1); cat(bar, t); cat(bar, ".");
     dec(t, (int)((pos % 16U) / 4U) + 1); cat(bar, t);
-    text_c(120, 74, bar, 1, DIM);
-    text_c(120, 26, fs.project, 1, fs.project_dirty ? C_ORANGE : DIM);
+    text_c(120, 76, bar, 1, DIM);
+    text_c(120, 86, fs.project, 1, fs.project_dirty ? C_ORANGE : DIM);
+    text_c(120, 25, fs.preset, 1, track_color[fs.track]);
+    text(6, 25, "<", 1, DIM, NOBG); text_r(W - 6, 25, ">", 1, DIM);
     /* lanes */
     const int x0 = 18, lw = 218;
     for (unsigned t8 = 0; t8 < GROOVE_TRACKS; ++t8) {
@@ -884,12 +925,14 @@ static void draw_synth_like(void)
         t[0] = 0; dec(t, (int)fs.syn_page + 1); cat(t, "/"); char u[8]; dec(u, (int)pages); cat(t, u);
         text_r(W - 6, 28, t, 1, INK);
     }
-    draw_engine_visual(6, 46, W - 12, 96, fs.source, fs.tone, fs.patch, v->level, hit_level[fs.track], col, fs.now);
+    draw_engine_visual(6, 46, W - 12, 84, fs.source, fs.tone, fs.patch, v->level, hit_level[fs.track], col, fs.now);
+    text(6, 134, "<", 1, DIM, NOBG); text_r(W - 6, 134, ">", 1, DIM);
+    text_c(120, 134, fs.preset, 1, INK);
     if (groove_pad_count(fs.track) && fs.source != GROOVE_DX7) {
         t[0] = 0; cat(t, groove_pad_name(fs.track, fs.part));
-        text_c(120, 148, t, 1, INK);
+        text_c(120, 148, t, 1, DIM);
     } else if (fs.page == P_SYNTH && fs.source == GROOVE_DX7) {
-        text_c(120, 148, fm_pages[fs.syn_page % FM_PAGES].title, 1, INK);
+        text_c(120, 148, fm_pages[fs.syn_page % FM_PAGES].title, 1, DIM);
     }
     char names[24];
     if (fs.page == P_SYNTH) {
@@ -898,8 +941,8 @@ static void draw_synth_like(void)
         t[0] = 0; cat(t, "OCT "); char u[8]; dec(u, (int)fs.octave); cat(t, u);
         text_r(W - 6, 162, t, 1, DIM);
     }
-    hints(fs.page == P_SYNTH ? "E6 PAGE  SHIFT+E6 ENGINE"
-          : fs.page == P_ENV ? "E6 BYPASS  SHIFT+E6 ENGINE" : "E2-E5 EDIT");
+    hints(fs.page == P_SYNTH ? "E6 PRESET  EDIT PAGE  SH+E6 ENGINE"
+          : fs.page == P_ENV ? "E6 PRESET  SHIFT+E6 ENGINE" : "E2-E5 EDIT");
     for (unsigned i = 0; i < 4; ++i) {
         char lab[16], val[16];
         unsigned frac = 0;
@@ -1003,34 +1046,165 @@ static void draw_mix(void)
     hints("KEYS 1-8 MUTE  9-16 SOLO");
 }
 
-/* --- FX ---------------------------------------------------------- */
+/* --- FX: four cartoon cow pages -------------------------------- */
+#define COW_W 21
+#define COW_K RGB(34, 30, 34)
+#define COW_P RGB(255, 150, 170)
+#define COW_Y RGB(255, 208, 64)
+/* Pixel cow built from rectangles on a 21x15 unit grid; flip mirrors it. */
+static void cow(int x, int y, int u, int flip, unsigned frame, int mouth, int bob, uint16_t body)
+{
+#define R(ox, oy, w, h, c) fill(flip ? x + (COW_W - (ox) - (w)) * u : x + (ox) * u, y + (oy) * u, (w) * u, (h) * u, c)
+    if (y > (int)band_top + ROWS || y + 15 * u < (int)band_top) return;
+    int s1 = frame & 1U;
+    R(0, 4, 1, 5, COW_K); R(0, 9, 2, 1, COW_P);                       /* tail */
+    R(2 + s1, 11, 2, 4, body); R(5 - s1, 11, 2, 4, body);           /* legs */
+    R(9 + s1, 11, 2, 4, body); R(12 - s1, 11, 2, 4, body);
+    R(2 + s1, 14, 2, 1, COW_K); R(5 - s1, 14, 2, 1, COW_K); R(9 + s1, 14, 2, 1, COW_K); R(12 - s1, 14, 2, 1, COW_K);
+    R(1, 4, 13, 7, body);                                           /* body */
+    R(3, 5, 3, 3, COW_K); R(8, 4, 2, 2, COW_K); R(9, 8, 3, 2, COW_K); /* spots */
+    R(7, 11, 3, 1, COW_P);                                          /* udder */
+    R(13, 2 + bob, 6, 6, body); R(16, 5 + bob, 4, 3, COW_P);          /* head + muzzle */
+    R(14, bob, 1, 2, COW_Y); R(18, bob, 1, 2, COW_Y);                /* horns */
+    R(13, 3 + bob, 1, 2, COW_K); R(15, 3 + bob, 1, 1, COW_K);        /* ear + eye */
+    R(17, 6 + bob, 1, 1, COW_K); R(19, 6 + bob, 1, 1, COW_K);        /* nostrils */
+    if (mouth > 0) R(16, 8 + bob, 4, mouth, COW_K);
+#undef R
+}
+static void bubble(int cx, int y, const char *t, int sc)
+{
+    int w = text_w(t, sc) + 8;
+    fill(cx - w / 2, y, w, 7 * sc + 6, INK);
+    fill(cx - 2, y + 7 * sc + 6, 5, 3, INK);
+    text_c(cx, y + 3, t, sc, COW_K);
+}
+static unsigned delay_ms(unsigned v, unsigned bpm)
+{
+    static const uint16_t beat64[9] = {5, 8, 11, 16, 21, 24, 32, 48, 64}; /* 1/32T .. 1/4 in 1/64 beats */
+    unsigned beat_ms = 60000U / (bpm ? bpm : 120U);
+    if (v >= GROOVE_DELAY_SYNC && v <= GROOVE_DELAY_LAST) return beat_ms * beat64[v - GROOVE_DELAY_SYNC] / 64U;
+    return v < 128 ? v * 8U : v <= 201 ? 360U + (v - 137U) * 10U : 1020U + (v - 202U) * 20U;
+}
 static void draw_fx(void)
 {
-    header("EFFECTS", C_BLUE);
-    unsigned decay = fs.fx[0], fb = fs.fx[2], ret = fs.fx[3];
-    int cx = 120, cy = 92;
-    for (unsigned r = 0; r < 6; ++r) {
-        unsigned ph = (fs.now / 30U + r * 40U) % 240U;
-        int rad = 6 + (int)(ph * (10U + decay / 4U) / 100U);
-        if (rad < 66) ring(cx, cy, rad, ph < 120U ? C_BLUE : PANEL2);
+    static const char *const titles[4] = {"MOO CANYON", "PING PONG", "DISCO COW", "MOON JUMP"};
+    unsigned pg = fs.fx_page & 3U;
+    header(titles[pg], C_BLUE);
+    const struct groove_view *tv = &fs.view[fs.track];
+    unsigned bpm = fs.tempo ? fs.tempo : 120U, hit = hit_level[fs.track];
+    unsigned beat_ms = 60000U / bpm;
+    uint16_t cream = INK;
+    if (pg == 0) {                                                     /* reverb: shouting into a canyon */
+        fill(0, 21, W, 170, RGB(18, 14, 40));
+        for (int i = 0; i < 24; ++i) {                                  /* stars */
+            unsigned sd = (unsigned)i * 2654435761U;
+            if (((fs.now / 300U) + (unsigned)i) % 5U) pix((int)((sd >> 8) % W), 26 + (int)((sd >> 20) % 50), INK);
+        }
+        for (int x = 0; x < W; x += 4) {
+            int h1 = 40 + ((x * 7) % 31) + (x > 120 ? (x - 120) / 3 : 0), h2 = 20 + ((x * 13) % 23);
+            fill(x, 190 - h1, 4, h1, RGB(46, 34, 72)); fill(x, 190 - h2, 4, h2, RGB(30, 24, 52));
+        }
+        int mx = 66, my = 128, mouth = hit ? 2 + (int)((fs.now / 70U) & 1U) : 0;
+        cow(8, 112, 3, 0, (fs.now / 220U) & 1U, mouth, hit ? (int)((fs.now / 90U) & 1U) : 0, cream);
+        unsigned echoes = 1U + fs.fx[0] / 34U, period = 900U;
+        for (unsigned k = 0; k < 5; ++k) {
+            if (k >= echoes) break;
+            int ex = 112 + (int)k * 34, ey = 98 - (int)k * 6;
+            unsigned dim = 255U - k * 38U;
+            uint16_t col = RGB(dim, dim, dim);
+            unsigned arrive = (unsigned)(ex - mx) * 9U;                 /* ring travel time (ms) */
+            unsigned t = (fs.now + 3000U * 17U - arrive) % period;
+            int open = t < 260U && fs.fx[3] > 5;
+            cow(ex, ey, 1, 1, 0, open ? 2 : 0, 0, col);
+            if (open) text_c(ex + 10, ey - 9, k ? "moo" : "MOO", 1, col);
+        }
+        for (unsigned r = 0; r < 3; ++r) {                             /* sound rings */
+            unsigned t = (fs.now + r * 300U) % period;
+            int rad = (int)(t / 9U);
+            if (rad < 110) ring(mx + 6, my, rad, rad < 55 ? C_BLUE : PANEL2);
+        }
+        if (hit) bubble(40, 52, "MOO!", 2);
+    } else if (pg == 1) {                                              /* delay: bouncing cow echoes */
+        fill(0, 21, W, 170, RGB(14, 30, 24));
+        fill(0, 170, W, 21, RGB(30, 90, 40));
+        for (int x = 0; x < W; x += 12) fill(x + 3, 172, 2, 6, RGB(60, 150, 60));
+        unsigned ms = delay_ms(fs.fx[1], bpm);
+        if (ms < 60) ms = 60;
+        unsigned ghosts = 1U + fs.fx[2] / 26U;
+        if (ghosts > 6) ghosts = 6;
+        for (int k = (int)ghosts - 1; k >= 0; --k) {
+            uint32_t t = fs.now > (uint32_t)k * ms ? fs.now - (uint32_t)k * ms : 0;
+            unsigned ph = (t % (ms * 2U)) * 256U / (ms * 2U);          /* 0..255 over a round trip */
+            int dir = ph >= 128U, along = (int)(ph & 127U) * 256 / 128;
+            int px = 6 + (dir ? 168 - along * 168 / 256 : along * 168 / 256);
+            int h = isin((ph & 127U) + 0U) > 0 ? (isin(((ph & 127U) * 128U) / 128U) * 70) / 127 : 0;
+            unsigned dim = 255U - (unsigned)k * 36U;
+            cow(px, 150 - (h > 0 ? h : 0) - 20, 2, dir, (t / 120U) & 1U, k == 0 && (ph & 127U) < 14 ? 2 : 0, 0, RGB(dim, dim, dim));
+        }
+        char t[16]; t[0] = 0; dec(t, (int)ms); cat(t, " MS");
+        text_c(120, 30, t, 2, C_GREEN);
+        text_c(120, 48, fs.fx[2] > 80 ? "ECHO ECHO ECHO" : "echo", 1, DIM);
+    } else if (pg == 2) {                                              /* tempo: disco cow */
+        unsigned beat = (fs.now % beat_ms) * 256U / beat_ms, count = (fs.now / beat_ms) & 3U;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 8; ++x) {
+                static const uint16_t tile[4] = {RGB(220, 50, 120), RGB(50, 190, 240), RGB(240, 210, 50), RGB(120, 230, 90)};
+                int on = (((unsigned)(x + y) + count) & 3U) == 0;
+                fill(x * 30, 140 + y * 12, 29, 11, on ? tile[(x + y) & 3] : RGB(26, 22, 40));
+            }
+        fill(0, 21, W, 119, RGB(12, 10, 26));
+        vline(120, 21, 24, DIM);
+        disc(120, 58, 17, RGB(150, 150, 170)); ring(120, 58, 17, INK);
+        for (int i = -2; i <= 2; ++i) line(120 + i * 6, 42, 120 + i * 6, 74, RGB(90, 90, 110));
+        for (int i = -1; i <= 1; ++i) line(104, 58 + i * 8, 136, 58 + i * 8, RGB(90, 90, 110));
+        for (unsigned k = 0; k < 8; ++k) {                              /* light beams */
+            int ang = (int)((fs.now / 12U) + k * 32U);
+            int bx = 120 + isin((unsigned)ang) * 110 / 127;
+            line(120, 58, bx, 150, RGB(60 + (k & 1U ? 100 : 0), 40, 100));
+        }
+        int hop = (int)(beat < 128U ? isin(beat * 64U / 128U) * 16 / 127 : 0);
+        cow(78, 98 - hop, 3, (count & 1U) ? 0 : 1, count & 1U, hop > 8 ? 2 : 0, hop > 10 ? 1 : 0, cream);
+        char t[12]; dec(t, (int)bpm); cat(t, " BPM");
+        text_c(120, 24, t, 1, C_ORANGE);
+        if (count == 0 && beat < 100U) text_c(120, 126, "BOOGIE!", 1, C_ORANGE);
+    } else {                                                           /* sends: cow jumps over the moon */
+        fill(0, 21, W, 170, RGB(8, 10, 34));
+        for (int i = 0; i < 40; ++i) {
+            unsigned sd = (unsigned)i * 2246822519U;
+            if (((fs.now / 200U) + (unsigned)i * 3U) % 7U) pix((int)((sd >> 8) % W), 24 + (int)((sd >> 20) % 140), (i & 3) ? DIM : INK);
+        }
+        disc(120, 82, 30, RGB(250, 240, 190)); disc(110, 74, 6, RGB(220, 210, 160)); disc(132, 90, 4, RGB(220, 210, 160)); disc(124, 68, 3, RGB(220, 210, 160));
+        fill(0, 176, W, 15, RGB(18, 40, 30));
+        unsigned bar = beat_ms * 4U, ph = (fs.now % bar) * 256U / bar;
+        int px = -50 + (int)ph * 300 / 256;
+        int arc = isin(ph / 2U) > 0 ? isin(ph / 2U) * 105 / 127 : 0;
+        cow(px, 152 - arc, 2, 0, (fs.now / 110U) & 1U, arc > 90 ? 2 : 0, 0, cream);
+        if (arc > 95) bubble(px + 22, 130 - arc, "MOO!", 1);
+        char r[16], d[16]; r[0] = 0; d[0] = 0; dec(r, fs.sends[0]); dec(d, fs.sends[1]);
+        text(6, 24, "RVB", 1, C_BLUE, NOBG); text(30, 24, r, 1, INK, NOBG);
+        text(6, 34, "DLY", 1, C_ORANGE, NOBG); text(30, 34, d, 1, INK, NOBG);
     }
-    /* echo trail */
-    for (unsigned e = 0; e < 6; ++e) {
-        int x = 30 + (int)e * 30;
-        unsigned amp = 40U - e * (45U - fb / 4U < 40U ? 6U : 5U);
-        if (amp > 40U) amp = 4U;
-        fill(x, cy - (int)amp / 2, 8, (int)amp, e == 0 ? C_ORANGE : PANEL2);
+    char v1[12], v2[12], v3[12], v4[12], dl[12];
+    v1[0] = v2[0] = v3[0] = v4[0] = 0;
+    if (pg == 0) {
+        dec(v1, fs.fx[0]); dec(v2, fs.fx[3]); dec(v3, fs.sends[0]); dec(v4, fs.sends[1]);
+        knob_cell(0, "DECAY", v1, fs.fx[0]); knob_cell(1, "RETURN", v2, fs.fx[3]);
+        knob_cell(2, "RVB SND", v3, fs.sends[0] * 100U / 15U); knob_cell(3, "DLY SND", v4, fs.sends[1] * 100U / 15U);
+    } else if (pg == 1) {
+        delay_label(fs.fx[1], dl); dec(v2, fs.fx[2]); cat(v3, fs.fx[1] >= GROOVE_DELAY_SYNC && fs.fx[1] <= GROOVE_DELAY_LAST ? "SYNC" : "FREE");
+        dec(v4, fs.sends[1]);
+        knob_cell(0, "D TIME", dl, fs.fx[1] > 127 ? 50U : fs.fx[1] * 100U / 127U); knob_cell(1, "FEEDBK", v2, fs.fx[2]);
+        knob_cell(2, "MODE", v3, 50); knob_cell(3, "DLY SND", v4, fs.sends[1] * 100U / 15U);
+    } else if (pg == 2) {
+        dec(v1, (int)bpm); dec(v2, (int)fs.swing); dec(v3, (int)fs.metro); dec(v4, tv->volume);
+        knob_cell(0, "TEMPO", v1, (bpm > 30 ? bpm - 30U : 0U) * 100U / 270U); knob_cell(1, "SWING", v2, fs.swing * 2U);
+        knob_cell(2, "METRO", v3, fs.metro * 50U); knob_cell(3, "LEVEL", v4, tv->volume * 100U / 127U);
+    } else {
+        dec(v1, fs.sends[0]); dec(v2, fs.sends[1]); dec(v3, tv->volume); dec(v4, (int)bpm);
+        knob_cell(0, "REVERB", v1, fs.sends[0] * 100U / 15U); knob_cell(1, "DELAY", v2, fs.sends[1] * 100U / 15U);
+        knob_cell(2, "LEVEL", v3, tv->volume * 100U / 127U); knob_cell(3, "TEMPO", v4, (bpm > 30 ? bpm - 30U : 0U) * 100U / 270U);
     }
-    disc(cx, cy, 5 + (int)ret / 20, C_GREEN);
-    char d[12], dl[12], f[12], r[12];
-    d[0] = 0; dec(d, fs.fx[0]);
-    delay_label(fs.fx[1], dl);
-    f[0] = 0; dec(f, fs.fx[2]); r[0] = 0; dec(r, fs.fx[3]);
-    knob_cell(0, "DECAY", d, fs.fx[0]);
-    knob_cell(1, "D TIME", dl, fs.fx[1] > 127 ? 50U : fs.fx[1] * 100U / 127U);
-    knob_cell(2, "FEEDBK", f, fs.fx[2]);
-    knob_cell(3, "RETURN", r, fs.fx[3]);
-    hints("E6 TEMPO");
+    hints("FX NEXT PAGE  HOME EXIT");
 }
 
 /* --- Arp --------------------------------------------------------- */

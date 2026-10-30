@@ -761,6 +761,13 @@ static FM1_DSP_CODE unsigned message(unsigned track, const uint8_t *m, size_t n)
             }
             status[track].edit_dirty = 1;
             changed = 1;
+        } else if (ext_is(groove_source_type(track))) {
+            panic(track);
+            ext_preset(groove_source_type(track), sources[track].ptr, m[1] % EXT_PRESETS);
+            tracks[track].program = (uint8_t)(m[1] % EXT_PRESETS);
+            tracks[track].modified = 0;
+            status[track].edit_dirty = 1;
+            changed = 1;
         } else if (groove_source_type(track) == GROOVE_303)
             changed = bass_parameter(track, BASS303_WAVE, m[1] & 1U);
         else if (groove_source_type(track) == GROOVE_PSG)
@@ -1252,7 +1259,7 @@ __attribute__((cold, minsize)) void groove_control_edit(unsigned track, int prog
     if (track >= GROOVE_TRACKS || track_roles[track] == GROOVE_TRACK_OFF)
         return;
     unsigned type = groove_source_type(track);
-    int count = type == GROOVE_DX7 ? FM1_FM_PROGRAMS : type == GROOVE_PSG ? 4 : type == GROOVE_303 ? 2 : 1;
+    int count = type == GROOVE_DX7 ? FM1_FM_PROGRAMS : type == GROOVE_PSG ? 4 : type == GROOVE_303 ? 2 : ext_is(type) ? EXT_PRESETS : 1;
     program_steps %= count;
     if (!program_steps && !volume_steps && (!cutoff_steps || type != GROOVE_303))
         return;
@@ -1838,6 +1845,7 @@ __attribute__((cold, minsize)) int groove_project_valid(const struct groove_proj
             v->program >= (type == GROOVE_DX7   ? FM1_FM_PROGRAMS
                            : type == GROOVE_303 ? 2
                            : type == GROOVE_PSG ? 4
+                           : ext_is(type)       ? EXT_PRESETS
                                                 : 1))
             return 0;
         for (unsigned i = 0; i < 4; ++i)

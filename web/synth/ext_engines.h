@@ -22,4 +22,7 @@ unsigned ext_get(unsigned type, const void *p, unsigned parameter);
 const fm1_param_t *ext_param(unsigned type, unsigned parameter);
 unsigned ext_limit(unsigned type, void *p, unsigned voices);
 unsigned ext_active(unsigned type, const void *p);
+enum { EXT_PRESETS = 8 };
+void ext_preset(unsigned type, void *p, unsigned program);
+const char *ext_preset_name(unsigned type, unsigned program);
 #endif
