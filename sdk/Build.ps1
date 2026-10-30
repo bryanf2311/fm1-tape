@@ -373,14 +373,14 @@ try {
         $options = @($flags)
         # This PI32 LTO plugin can discard application definitions when a
         # native SDK object has weak defaults. Keep user entry units native.
-        if ($source -in @('app/screen.c','app/ui_op1.c','app/transfer.c','app/midi_router.c')) {
+        if ($source -in @('app/screen.c','app/transfer.c','app/midi_router.c')) {
             $options += '-fno-lto'
         }
         if ($source -eq 'app/board/panel.c') { $options += @('-fno-lto','-fno-pic') }
         $options += @('-fwrapv','-fno-fast-math','-ffp-contract=off')
         # Storage and screen run only from control; keep audio DSP on O2.
-        if ($source -in @('app/project.c','app/transfer.c','app/samples.c','app/screen.c','app/ui_op1.c','app/presets.c','app/midi_router.c','app/fm_factory.c','app/fm_library.c')) { $options += '-Oz' }
-        if ($source -in @('app/screen.c','app/ui_op1.c')) { $options += '-fno-inline-functions' }
+        if ($source -in @('app/project.c','app/transfer.c','app/samples.c','app/screen.c','app/presets.c','app/midi_router.c','app/fm_factory.c','app/fm_library.c')) { $options += '-Oz' }
+        if ($source -eq 'app/screen.c') { $options += '-fno-inline-functions' }
         $arguments = @($options) + @('-MMD','-MF',($output + '.d'),'-c',$inputFile,'-o',$output)
         Write-Host "Compile $source"
         Run (Join-Path $bin 'clang.exe') $arguments
