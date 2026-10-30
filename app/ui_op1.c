@@ -320,6 +320,28 @@ static void toggle_step(unsigned step)
     groove_sequence_edit(track, step, selected_note, on ? 0 : 100);
     cursor = step;
 }
+/* New tape: take the sounds of a factory project, wipe its notes, name it. The
+ * second press within three seconds confirms when there are unsaved edits. */
+static uint32_t new_until;
+static unsigned new_armed;
+static void new_tape(unsigned starter, uint32_t now)
+{
+    if (groove_project_dirty() && !(new_armed == starter + 1U && (int32_t)(new_until - now) > 0)) {
+        new_armed = starter + 1U; new_until = now + 3000U;
+        say("PRESS AGAIN: ERASE AND START NEW TAPE", now);
+        return;
+    }
+    new_armed = 0;
+    if (!release_keys()) return;
+    if (groove_factory_load(starter % GROOVE_FACTORY_PROJECTS)) { say("NEW TAPE FAILED", now); return; }
+    for (unsigned t = 0; t < GROOVE_TRACKS; ++t) groove_edit_clear(t, 0, 2);
+    static const char name[12] = {'N', 'E', 'W', ' ', 'T', 'A', 'P', 'E', ' ', ' ', ' ', ' '};
+    for (unsigned i = 0; i < 12; ++i) groove_project_rename(i, name[i]);
+    cursor = 0; step_page = 0; writing = 0; track = 0; tape_follow = 1;
+    groove_edit_record(0, 0, 0); groove_edit_seek(0, 0);
+    page = P_TAPE;
+    say("NEW TAPE - HIT REC THEN PLAY", now);
+}
 /* Lift / drop / cut on the tape: copy, paste, clear a 16-step splice or the whole reel. */
 static void tape_function(unsigned f, uint32_t now)
 {
@@ -332,6 +354,7 @@ static void tape_function(unsigned f, uint32_t now)
     case 4: r = groove_edit_paste(track, cursor, 2); say(r ? "NOTHING TO DROP" : "DROPPED REEL", now); break;
     case 5: r = groove_edit_clear(track, cursor, 2); say(r ? "ERASE FAILED" : "REEL ERASED", now); break;
     case 6: r = groove_edit_undo(); say(r ? "NOTHING TO UNDO" : "UNDO / REDO", now); break;
+    case 8: new_tape(13, now); break;
     case 7: {
         unsigned len = groove_sequence_length(track);
         r = groove_edit_repeat(track, len < 64U ? len * 2U : 64U);
@@ -468,7 +491,9 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
     }
 
     /* transport */
-    if ((pressed & BUTTON(REC))) { writing ^= 1U; if (writing && page == P_SYNTH) {} }
+    if (pressed & BUTTON(REC)) {
+        if (page == P_PROJECT) new_tape(project_bank ? project_slot : 13U, now); else writing ^= 1U;
+    }
     groove_edit_record(writing, track, cursor);
     if (pressed & BUTTON(PLAY)) {
         struct groove_view v = {0};
@@ -553,7 +578,7 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
         for (unsigned i = 0; i < 16; ++i)
             if (key_down & keys & (1U << white_keys[i])) {
                 if (i < UI_TRACKS) select_track(i);
-                else if (page == P_TAPE && i < UI_TRACKS + 8U) tape_function(i - UI_TRACKS, now);
+                else if (page == P_TAPE && i < UI_TRACKS + 9U) tape_function(i - UI_TRACKS, now);
             }
         keys = 0;
         blocked_keys |= c->keys;
@@ -791,7 +816,7 @@ static void draw_tape(void)
     knob_cell(3, "TEMPO", v4, (fs.tempo > 30 ? fs.tempo - 30U : 0U) * 100U / 270U);
     if (fs.shift) {
         fill(0, 186, W, 11, PANEL);
-        text(2, 188, "1-4 TRK 5 LIFT 6 DROP 7 CUT 8-10 REEL 11 UNDO 12 LOOP", 1, C_ORANGE, NOBG);
+        text(2, 188, "1-4 TRK 5 LIFT 6 DROP 7 CUT 8-10 REEL 11 UND 12 LOOP 13 NEW", 1, C_ORANGE, NOBG);
     }
 }
 
@@ -1247,7 +1272,7 @@ static void draw_project(void)
         if (!fs.bank && fs.slot_state[i]) { name[0] = 0; cat(name, "EMPTY"); }
         text(x + 3, y + 23, name, 1, fg, NOBG);
     }
-    hints(fs.confirm ? "SAVE AGAIN TO OVERWRITE" : "SAVE WRITE  S+SAVE LOAD  S+E6 BANK");
+    hints(fs.confirm ? "SAVE AGAIN TO OVERWRITE" : "SAVE WRITE  S+SAVE LOAD  REC NEW TAPE");
     text_c(120, 150, fs.names[fs.slot], 2, INK);
 }
 
