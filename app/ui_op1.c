@@ -208,6 +208,9 @@ static uint8_t encoder_speed[7];
 static uint32_t encoder_time[7];
 static char web_knobs[4][2][16];
 
+/* This panel runs four tape tracks; the engine keeps eight project rows, tracks 5-8 are parked (role OFF). */
+enum { UI_TRACKS = 4 };
+
 /* Everything the painter needs, captured once per frame so all bands match. */
 struct frame_state {
     struct groove_view view[GROOVE_TRACKS];
@@ -274,7 +277,7 @@ static int encoder_step(unsigned i, int v, uint32_t now)
 }
 static void select_track(unsigned t)
 {
-    if (t >= GROOVE_TRACKS || t == track) return;
+    if (t >= UI_TRACKS || t == track) return;
     track = t;
     cursor %= groove_sequence_length(track);
     drum = drum_part[track] < groove_pad_count(track) ? drum_part[track] : 0;
@@ -495,7 +498,7 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
     unsigned type = groove_source_type(track);
     if (c->encoders[0]) {
         if (page == P_SEQ) cursor = (unsigned)clampi((int)cursor + c->encoders[0], 0, (int)groove_sequence_length(track) - 1), step_page = cursor / 16U;
-        else select_track((unsigned)clampi((int)track + c->encoders[0], 0, 7));
+        else select_track((unsigned)clampi((int)track + c->encoders[0], 0, (int)UI_TRACKS - 1));
     }
     if (c->encoders[1]) {
         if (page == P_TAPE || page == P_SEQ) {
@@ -549,8 +552,8 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
     if (shift_down) {
         for (unsigned i = 0; i < 16; ++i)
             if (key_down & keys & (1U << white_keys[i])) {
-                if (i < 8) select_track(i);
-                else if (page == P_TAPE) tape_function(i - 8U, now);
+                if (i < UI_TRACKS) select_track(i);
+                else if (page == P_TAPE && i < UI_TRACKS + 8U) tape_function(i - UI_TRACKS, now);
             }
         keys = 0;
         blocked_keys |= c->keys;
@@ -562,7 +565,7 @@ static int apply_controls(const struct fm1_controls *c, uint32_t now)
         if (!seq_sub) keys = 0;
     } else if (page == P_MIX) {
         for (unsigned i = 0; i < 16; ++i)
-            if (key_down & keys & (1U << white_keys[i])) groove_mix_toggle(i & 7U, i >= 8);
+            if (i < 2U * UI_TRACKS && (key_down & keys & (1U << white_keys[i]))) groove_mix_toggle(i % UI_TRACKS, i >= UI_TRACKS);
         keys = 0;
     } else if (page == P_PROJECT) {
         for (unsigned i = 0; i < 16; ++i)
@@ -608,7 +611,7 @@ static void capture(uint32_t now)
     fs.boot = boot_active; fs.seq_sub = seq_sub; fs.part = tone_part(); fs.syn_page = syn_page[track];
     fs.source = groove_source_type(track); fs.arp_on = groove_arp_enabled(track);
     fs.slot = project_slot; fs.bank = project_bank; fs.confirm = project_confirm;
-    for (unsigned t = 0; t < GROOVE_TRACKS; ++t) {
+    for (unsigned t = 0; t < UI_TRACKS; ++t) {
         groove_get_view(t, t == track ? cursor : 0, &fs.view[t]);
         uint64_t lane = fs.view[t].active_steps;
         if (groove_pad_count(t))
@@ -751,28 +754,28 @@ static void draw_tape(void)
     text(6, 25, "<", 1, DIM, NOBG); text_r(W - 6, 25, ">", 1, DIM);
     /* lanes */
     const int x0 = 18, lw = 218;
-    for (unsigned t8 = 0; t8 < GROOVE_TRACKS; ++t8) {
-        int y = 102 + (int)t8 * 11;
+    for (unsigned t8 = 0; t8 < UI_TRACKS; ++t8) {
+        int y = 100 + (int)t8 * 22;
         const struct groove_view *v = &fs.view[t8];
         unsigned l = v->sequence_length ? v->sequence_length : 16;
         uint16_t col = track_color[t8];
         if (v->muted || (!v->audible && v->solo == 0)) col = DIM;
         char n[2] = {(char)('1' + t8), 0};
-        fill(0, y, W, 10, t8 == fs.track ? PANEL2 : PANEL);
-        if (t8 == fs.track) fill(0, y, 2, 10, track_color[t8]);
-        text(5, y + 1, n, 1, t8 == fs.track ? track_color[t8] : DIM, NOBG);
+        fill(0, y, W, 20, t8 == fs.track ? PANEL2 : PANEL);
+        if (t8 == fs.track) fill(0, y, 3, 20, track_color[t8]);
+        text(7, y + 6, n, 1, t8 == fs.track ? track_color[t8] : DIM, NOBG);
         for (unsigned s = 0; s < l; ++s) {
             int sx = x0 + (int)(s * (unsigned)lw / l);
             int sw = (int)((s + 1) * (unsigned)lw / l) - (int)(s * (unsigned)lw / l);
-            if ((s & 15U) == 0 && s) vline(sx, y, 10, DIM);
-            if ((fs.lanes[t8] >> s) & 1U) fill(sx, y + 2, sw > 1 ? sw - 1 : 1, 6, col);
+            if ((s & 15U) == 0 && s) vline(sx, y, 20, DIM);
+            if ((fs.lanes[t8] >> s) & 1U) fill(sx, y + 3, sw > 1 ? sw - 1 : 1, 14, col);
         }
         if (v->playing) {
             int hx = x0 + (int)(v->play_step * (unsigned)lw / l);
-            vline(hx, y, 10, INK);
+            vline(hx, y, 20, INK);
         }
-        if (hit_level[t8]) disc(W - 5, y + 5, 2, col);
-        if (t8 == fs.track && fs.writing) disc(W - 12, y + 5, 3, RED);
+        if (hit_level[t8]) disc(W - 5, y + 10, 2, col);
+        if (t8 == fs.track && fs.writing) disc(W - 12, y + 10, 3, RED);
     }
     /* cursor marker when parked */
     if (!fs.playing) {
@@ -788,7 +791,7 @@ static void draw_tape(void)
     knob_cell(3, "TEMPO", v4, (fs.tempo > 30 ? fs.tempo - 30U : 0U) * 100U / 270U);
     if (fs.shift) {
         fill(0, 186, W, 11, PANEL);
-        text(2, 188, "1-8 TRK 9 LIFT 10 DROP 11 CUT 12-14 REEL 15 UNDO 16 LOOP", 1, C_ORANGE, NOBG);
+        text(2, 188, "1-4 TRK 5 LIFT 6 DROP 7 CUT 8-10 REEL 11 UNDO 12 LOOP", 1, C_ORANGE, NOBG);
     }
 }
 
@@ -1021,29 +1024,29 @@ static void draw_seq(void)
 static void draw_mix(void)
 {
     header("MIXER", C_GREEN);
-    for (unsigned t = 0; t < 8; ++t) {
+    for (unsigned t = 0; t < UI_TRACKS; ++t) {
         const struct groove_view *v = &fs.view[t];
-        int x = 8 + (int)t * 29, top = 30, hh = 120;
+        int x = 16 + (int)t * 56, top = 30, hh = 120;
         uint16_t col = v->muted ? DIM : track_color[t];
-        fill(x, top, 22, hh, PANEL);
+        fill(x, top, 40, hh, PANEL);
         int level = (int)(v->volume * (unsigned)hh / 127U);
-        fill(x + 2, top + hh - level, 18, level, col);
+        fill(x + 3, top + hh - level, 34, level, col);
         int meter = (int)((v->level > 100 ? 100U : v->level) * (unsigned)hh / 100U);
-        fill(x + 8, top + hh - meter, 6, meter, INK);
-        if (t == fs.track) frame(x - 2, top - 2, 26, hh + 4, INK);
+        fill(x + 15, top + hh - meter, 10, meter, INK);
+        if (t == fs.track) frame(x - 2, top - 2, 44, hh + 4, INK);
         char n[2] = {(char)('1' + t), 0};
-        text_c(x + 11, top + hh + 6, n, 1, col);
-        fill(x + 2, top + hh + 18, 8, 8, v->muted ? RED : PANEL2);
-        text(x + 4, top + hh + 19, "M", 1, v->muted ? BG : DIM, NOBG);
-        fill(x + 12, top + hh + 18, 8, 8, v->solo ? C_ORANGE : PANEL2);
-        text(x + 14, top + hh + 19, "S", 1, v->solo ? BG : DIM, NOBG);
+        text_c(x + 20, top + hh + 6, n, 1, col);
+        fill(x + 4, top + hh + 18, 14, 10, v->muted ? RED : PANEL2);
+        text(x + 8, top + hh + 19, "M", 1, v->muted ? BG : DIM, NOBG);
+        fill(x + 22, top + hh + 18, 14, 10, v->solo ? C_ORANGE : PANEL2);
+        text(x + 26, top + hh + 19, "S", 1, v->solo ? BG : DIM, NOBG);
     }
     char v1[12], v2[12], v3[12]; dec(v1, fs.view[fs.track].volume); dec(v2, fs.sends[0]); dec(v3, fs.sends[1]);
     knob_cell(0, "LEVEL", v1, fs.view[fs.track].volume * 100U / 127U);
     knob_cell(1, "REVERB", v2, fs.sends[0] * 100U / 15U);
     knob_cell(2, "DELAY", v3, fs.sends[1] * 100U / 15U);
     knob_cell(3, "CUTOFF", "", 50);
-    hints("KEYS 1-8 MUTE  9-16 SOLO");
+    hints("KEYS 1-4 MUTE  5-8 SOLO");
 }
 
 /* --- FX: four cartoon cow pages -------------------------------- */
@@ -1315,6 +1318,8 @@ void groove_screen_init(void)
     prev_buttons = prev_keys = blocked_keys = retry_reset = 0;
     shift_down = arp_down = arp_long = 0;
     project_slot = project_bank = project_confirm = 0;
+    for (unsigned t = UI_TRACKS; t < GROOVE_TRACKS; ++t)
+        if (groove_track_role(t) != GROOVE_TRACK_OFF) (void)groove_track_role_set(t, GROOVE_TRACK_OFF);
     notice = NULL; painting = 0; last_signature = ~0U;
     memset(hit_seen, 0, sizeof hit_seen); memset(hit_until, 0, sizeof hit_until);
     memset(encoder_dir, 0, sizeof encoder_dir); memset(encoder_speed, 0, sizeof encoder_speed);
@@ -1338,9 +1343,9 @@ static void update_leds(void)
             if (fs.playing && fs.play_step == step) bits ^= 1U << white_keys[i];
         }
     } else if (page == P_MIX) {
-        for (unsigned t = 0; t < 8; ++t) {
+        for (unsigned t = 0; t < UI_TRACKS; ++t) {
             if (fs.view[t].muted) bits |= 1U << white_keys[t];
-            if (fs.view[t].solo) bits |= 1U << white_keys[t + 8];
+            if (fs.view[t].solo) bits |= 1U << white_keys[t + UI_TRACKS];
         }
     } else if (page == P_PROJECT) bits = 1U << white_keys[project_slot];
     else for (unsigned k = 0; k < 27; ++k) if (key_note[k] != 0xff) bits |= 1U << k;
